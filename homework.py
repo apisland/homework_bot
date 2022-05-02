@@ -5,8 +5,9 @@ import time
 import requests
 from http import HTTPStatus
 
-from telegram import Bot
-from telegram.ext import Updater
+from telegram import Bot, TelegramError
+
+from exceptions import HTTPStatusCodeError
 
 from dotenv import load_dotenv
 
@@ -19,11 +20,12 @@ logging.basicConfig(
                                   encoding='utf-8', mode='w'),
               logging.StreamHandler(sys.stdout)])
 
-PRACTICUM_TOKEN = os.getenv('PRAKTIKUM_TOKEN')
+PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 RETRY_TIME = 600
+N_SEC_WEEK = 604800
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
@@ -39,9 +41,9 @@ def send_message(bot, message):
     """Отправка сообщений от бота."""
     try:
         bot.send_message(TELEGRAM_CHAT_ID, message)
-        logging.info('Сообщение в чат {TELEGRAM_CHAT_ID}: {message}')
-    except Exception:
-        logging.error('Ошибка отправки в чат {TELEGRAM_CHAT_ID}: {message}')
+        logging.info(f'Сообщение в чат {TELEGRAM_CHAT_ID}: {message}')
+    except TelegramError:
+        logging.error(f'Ошибка отправки в чат {TELEGRAM_CHAT_ID}: {message}')
 
 
 def get_api_answer(current_timestamp):
@@ -50,23 +52,19 @@ def get_api_answer(current_timestamp):
     В случае успешного запроса должна вернуть ответ API,
     преобразовав его из формата JSON к типам данных Python.
     """
-    timestamp = current_timestamp or int(time.time())
-    params = {'from_date': timestamp}
+    params = {'from_date': current_timestamp}
     try:
-        homework_statuses = requests.get(ENDPOINT, headers=HEADERS,
-                                         params=params)
-    except Exception as e:
+        homework_units = requests.get(ENDPOINT, headers=HEADERS,
+                                      params=params)
+    except ConnectionError as e:
         logging.error(f'Сбой в работе программы: Я.Практикум недоступен: {e}')
-        send_message(f'Сбой в работе программы: Я.Практикум недоступен: {e}')
-    if homework_statuses.status_code != HTTPStatus.OK:
-        status_code = homework_statuses.status_code
-        logging.error(f'Ошибка {status_code}')
-        raise Exception(f'Ошибка {status_code}')
+    if homework_units.status_code != HTTPStatus.OK:
+        logging.error(f'Ошибка {homework_units.status_code}')
+        raise HTTPStatusCodeError
     try:
-        return homework_statuses.json()
+        return homework_units.json()
     except requests.JSONDecodeError:
         logging.error('Сервер вернул невалидный json')
-        send_message('Сервер вернул невалидный json')
 
 
 def check_response(response):
@@ -88,8 +86,8 @@ def check_response(response):
     try:
         work = works_list[0]
     except IndexError:
-        logging.error('В списке нет работ')
-        raise IndexError('В списке нет работ')
+        logging.error('Отсутсвует работа или список работ')
+        raise IndexError('Отсутсвует работа или список работ')
     return work
 
 
@@ -105,18 +103,17 @@ def parse_status(homework):
         raise KeyError('Статус работы "homework_name" неверный')
     if 'status' not in homework:
         raise KeyError('Статус работы "status" неверный')
-    homework_name = homework['homework_name']
-    homework_status = homework['status']
-    verdict = ''
-    if homework_status is None:
+    homework_name = homework.get('homework_name')
+    homework_status = homework.get('status')
+    if homework_status not in HOMEWORK_STATUSES:
         logging.error(f'Статус работы {homework_status} неверный')
         raise KeyError(f'Статус работы {homework_status} неверный')
     elif homework_status == 'reviewing':
-        verdict = 'Работа взята на проверку ревьюером.'
+        verdict = HOMEWORK_STATUSES.get('reviewing')
     elif homework_status == 'rejected':
-        verdict = 'Работа проверена: у ревьюера есть замечания.'
+        verdict = HOMEWORK_STATUSES.get('rejected')
     elif homework_status == 'approved':
-        verdict = 'Работа проверена: ревьюеру всё понравилось. Ура!'
+        verdict = HOMEWORK_STATUSES.get('approved')
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
@@ -129,10 +126,10 @@ def check_tokens():
     tokens = [PRACTICUM_TOKEN,
               TELEGRAM_TOKEN,
               TELEGRAM_CHAT_ID]
-    for i in tokens:
-        if i is None:
-            logging.critical(f'Отсутствует обязательная'
-                             f'переменная окружения: {i}'
+    for _ in tokens:
+        if _ is None:
+            logging.critical(f'Отсутствуют обязательные '
+                             f'токены/переменные окружения: {_} '
                              f'Программа принудительно остановлена.')
             return False
     return True
@@ -140,26 +137,32 @@ def check_tokens():
 
 def main():
     """Основная логика работы бота."""
-    updater = Updater(token=TELEGRAM_TOKEN)
-    updater.start_polling()
-    updater.idle()
     logging.debug('бот включился')
 
+    if not check_tokens():
+        logging.critical('Не обнаружены обязательные токены/переменные')
+    else:
+        check_tokens()
+
     bot = Bot(token=TELEGRAM_TOKEN)
-    current_timestamp = int(time.time())
+    current_timestamp = int(time.time()) - N_SEC_WEEK
     while True:
         try:
             response = get_api_answer(current_timestamp)
             if response.get('homeworks'):
-                send_message(parse_status(response.get('homeworks')[0]))
+                send_message(bot, parse_status(response.get('homeworks')[0]))
+            if 'current_date' not in response:
+                raise KeyError('Текущая дата не обнаружена')
             current_timestamp = response.get('current_date')
             time.sleep(RETRY_TIME)
 
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
             logging.error(message)
-            send_message(bot, message)
-            time.sleep(RETRY_TIME)
+            if response is None:
+                send_message(bot, message)
+        finally:
+            return response
 
 
 if __name__ == '__main__':
