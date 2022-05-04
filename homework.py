@@ -2,14 +2,18 @@ import logging
 import os
 import sys
 import time
-import requests
 from http import HTTPStatus
+from json import JSONDecodeError
+import requests
 
-from telegram import Bot, TelegramError
+
+from telegram import Bot
+from telegram import TelegramError
+
+from dotenv import load_dotenv
 
 from exceptions import HTTPStatusCodeError
 
-from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -63,7 +67,7 @@ def get_api_answer(current_timestamp):
         raise HTTPStatusCodeError
     try:
         return homework_units.json()
-    except requests.JSONDecodeError:
+    except JSONDecodeError:
         logging.error('Сервер вернул невалидный json')
 
 
@@ -76,7 +80,7 @@ def check_response(response):
     (он может быть и пустым), доступный
     в ответе API по ключу 'homeworks'.
     """
-    if type(response) is not dict:
+    if not isinstance(response, dict):
         raise TypeError('Некорректный ответ API')
     try:
         works_list = response['homeworks']
@@ -84,10 +88,14 @@ def check_response(response):
         logging.error('Ошибка по ключу homeworks')
         raise KeyError('Ошибка по ключу homeworks')
     try:
-        work = works_list[0]
-    except IndexError:
-        logging.error('Отсутсвует работа или список работ')
-        raise IndexError('Отсутсвует работа или список работ')
+        work = works_list[0:]
+    except UserWarning:
+        logging.info('Отсутсвует работа или список работ')
+        raise UserWarning('Отсутсвует работа или список работ')
+    if not isinstance(work, list):
+        logging.error('Не является списком')
+        send_message('Не является списком')
+        raise TypeError('Не является списком')
     return work
 
 
@@ -106,14 +114,8 @@ def parse_status(homework):
     homework_name = homework.get('homework_name')
     homework_status = homework.get('status')
     if homework_status not in HOMEWORK_STATUSES:
-        logging.error(f'Статус работы {homework_status} неверный')
         raise KeyError(f'Статус работы {homework_status} неверный')
-    elif homework_status == 'reviewing':
-        verdict = HOMEWORK_STATUSES.get('reviewing')
-    elif homework_status == 'rejected':
-        verdict = HOMEWORK_STATUSES.get('rejected')
-    elif homework_status == 'approved':
-        verdict = HOMEWORK_STATUSES.get('approved')
+    verdict = HOMEWORK_STATUSES.get(homework_status)
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
@@ -128,8 +130,8 @@ def check_tokens():
               TELEGRAM_CHAT_ID]
     for _ in tokens:
         if _ is None:
-            logging.critical(f'Отсутствуют обязательные '
-                             f'токены/переменные окружения: {_} '
+            logging.critical(f'Отсутствует обязательный '
+                             f'токен/переменная окружения: {_}. '
                              f'Программа принудительно остановлена.')
             return False
     return True
@@ -140,29 +142,32 @@ def main():
     logging.debug('бот включился')
 
     if not check_tokens():
-        logging.critical('Не обнаружены обязательные токены/переменные')
-    else:
-        check_tokens()
+        exit()
 
     bot = Bot(token=TELEGRAM_TOKEN)
     current_timestamp = int(time.time()) - N_SEC_WEEK
     while True:
         try:
             response = get_api_answer(current_timestamp)
-            if response.get('homeworks'):
-                send_message(bot, parse_status(response.get('homeworks')[0]))
+            homeworks = check_response(response)
+            if len(homeworks) == 0:
+                time.sleep(RETRY_TIME)
+            else:
+                for index in range(len(homeworks)):
+                    send_message(bot,
+                                 parse_status(response.get('homeworks')[index])
+                                 )
             if 'current_date' not in response:
                 raise KeyError('Текущая дата не обнаружена')
             current_timestamp = response.get('current_date')
-            time.sleep(RETRY_TIME)
 
-        except Exception as error:
+        except SystemError as error:
             message = f'Сбой в работе программы: {error}'
             logging.error(message)
-            if response is None:
+            if get_api_answer(current_timestamp) is None:
                 send_message(bot, message)
         finally:
-            return response
+            get_api_answer(current_timestamp)
 
 
 if __name__ == '__main__':
