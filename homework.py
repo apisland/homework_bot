@@ -62,6 +62,8 @@ def get_api_answer(current_timestamp):
                                       params=params)
     except ConnectionError as e:
         logging.error(f'Сбой в работе программы: Я.Практикум недоступен: {e}')
+        raise ConnectionError(f'Сбой в работе программы: '
+                              f'Я.Практикум недоступен: {e}')
     if homework_units.status_code != HTTPStatus.OK:
         logging.error(f'Ошибка {homework_units.status_code}')
         raise HTTPStatusCodeError
@@ -69,6 +71,7 @@ def get_api_answer(current_timestamp):
         return homework_units.json()
     except JSONDecodeError:
         logging.error('Сервер вернул невалидный json')
+        raise JSONDecodeError('Сервер вернул невалидный json')
 
 
 def check_response(response):
@@ -85,18 +88,11 @@ def check_response(response):
     try:
         works_list = response['homeworks']
     except KeyError:
-        logging.error('Ошибка по ключу homeworks')
         raise KeyError('Ошибка по ключу homeworks')
-    try:
-        work = works_list[0:]
-    except UserWarning:
-        logging.info('Отсутсвует работа или список работ')
-        raise UserWarning('Отсутсвует работа или список работ')
-    if not isinstance(work, list):
+    if not isinstance(works_list, list):
         logging.error('Не является списком')
-        send_message('Не является списком')
         raise TypeError('Не является списком')
-    return work
+    return works_list
 
 
 def parse_status(homework):
@@ -125,15 +121,17 @@ def check_tokens():
     Если отсутствует хотя бы одна переменная
     окружения — функция должна вернуть False, иначе — True.
     """
-    tokens = [PRACTICUM_TOKEN,
-              TELEGRAM_TOKEN,
-              TELEGRAM_CHAT_ID]
-    for _ in tokens:
-        if _ is None:
+    if (PRACTICUM_TOKEN is None
+            or TELEGRAM_TOKEN is None
+            or TELEGRAM_CHAT_ID is None):
+        tokens = [PRACTICUM_TOKEN,
+                  TELEGRAM_TOKEN,
+                  TELEGRAM_CHAT_ID]
+        for token in tokens:
             logging.critical(f'Отсутствует обязательный '
-                             f'токен/переменная окружения: {_}. '
+                             f'токен/переменная окружения: {token}. '
                              f'Программа принудительно остановлена.')
-            return False
+        return False
     return True
 
 
@@ -149,25 +147,23 @@ def main():
     while True:
         try:
             response = get_api_answer(current_timestamp)
-            homeworks = check_response(response)
-            if len(homeworks) == 0:
-                time.sleep(RETRY_TIME)
-            else:
-                for index in range(len(homeworks)):
-                    send_message(bot,
-                                 parse_status(response.get('homeworks')[index])
-                                 )
             if 'current_date' not in response:
                 raise KeyError('Текущая дата не обнаружена')
             current_timestamp = response.get('current_date')
-
+            homeworks = check_response(response)
+            if len(homeworks) != 0:
+                for homework in homeworks:
+                    send_message(bot, parse_status(homework))
+            else:
+                logging.info('Отсутсвует работа или список работ')
+                raise UserWarning('Отсутсвует работа или список работ')
         except SystemError as error:
             message = f'Сбой в работе программы: {error}'
             logging.error(message)
-            if get_api_answer(current_timestamp) is None:
-                send_message(bot, message)
+            send_message(bot, message)
+            raise error(message)
         finally:
-            get_api_answer(current_timestamp)
+            time.sleep(RETRY_TIME)
 
 
 if __name__ == '__main__':
