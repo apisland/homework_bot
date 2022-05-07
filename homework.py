@@ -121,9 +121,7 @@ def check_tokens():
     Если отсутствует хотя бы одна переменная
     окружения — функция должна вернуть False, иначе — True.
     """
-    if (PRACTICUM_TOKEN is None
-            or TELEGRAM_TOKEN is None
-            or TELEGRAM_CHAT_ID is None):
+    if not all([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]):
         tokens = [PRACTICUM_TOKEN,
                   TELEGRAM_TOKEN,
                   TELEGRAM_CHAT_ID]
@@ -140,6 +138,7 @@ def main():
     logging.debug('бот включился')
 
     if not check_tokens():
+        logging.info('работа бота остановлена')
         exit()
 
     bot = Bot(token=TELEGRAM_TOKEN)
@@ -147,21 +146,21 @@ def main():
     while True:
         try:
             response = get_api_answer(current_timestamp)
-            if 'current_date' not in response:
-                raise KeyError('Текущая дата не обнаружена')
-            current_timestamp = response.get('current_date')
             homeworks = check_response(response)
             if len(homeworks) != 0:
                 for homework in homeworks:
                     send_message(bot, parse_status(homework))
             else:
                 logging.info('Отсутсвует работа или список работ')
-                raise UserWarning('Отсутсвует работа или список работ')
+            if 'current_date' not in response:
+                raise KeyError('Текущая дата не обнаружена')
+            current_timestamp = response.get('current_date')
         except SystemError as error:
             message = f'Сбой в работе программы: {error}'
             logging.error(message)
-            send_message(bot, message)
-            raise error(message)
+            if error:
+                send_message(bot, message)
+                continue
         finally:
             time.sleep(RETRY_TIME)
 
